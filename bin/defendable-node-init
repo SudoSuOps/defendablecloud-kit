@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -u
+NODE_ID="${1:-mrd.defendable.eth}"
+HOSTNAME_SAFE="${NODE_ID//./-}"
+ROOT="${DEFENDABLEOS_ROOT:-/opt/defendableos}"
+echo "=== DEFENDABLE NODE INIT === node_id=$NODE_ID hostname=$HOSTNAME_SAFE"
+sudo hostnamectl set-hostname "$HOSTNAME_SAFE" 2>/dev/null || echo "(hostname unchanged — needs sudo)"
+mkdir -p "$ROOT"/{cloud,node,agents,flightsheets,assignments,models,runs,receipts,logs,configs,bin}
+TS_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+GPU="$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -1)"
+cat > "$ROOT/node/node.env" <<ENV
+NODE_ID=$NODE_ID
+HOSTNAME=$HOSTNAME_SAFE
+ROLE=defendablecloud-test-node
+STATUS=initialized
+DEFENDABLEOS_ROOT=$ROOT
+INITIALIZED_AT_UTC=$TS_ISO
+ENV
+cat > "$ROOT/node/identity.json" <<ID
+{"node_id":"$NODE_ID","hostname":"$HOSTNAME_SAFE","role":"defendablecloud-test-node","gpu":"$GPU","initialized_at_utc":"$TS_ISO"}
+ID
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+cat > "$ROOT/receipts/node_init_$TS.txt" <<RC
+node_id=$NODE_ID
+hostname=$HOSTNAME_SAFE
+status=initialized
+gpu=$GPU
+initialized_at_utc=$TS_ISO
+RC
+echo "=== NODE INIT COMPLETE ==="; cat "$ROOT/node/node.env"

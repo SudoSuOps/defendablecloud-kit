@@ -1,0 +1,6 @@
+# Model registry for this node (tiers: edge|small|mid|frontier)
+models:
+  swarmjelly-4b:   {provider: ollama, size_class: edge,  context: 8192, notes: "in-house Qwen3-4B (thinking; use think:false)"}
+  hermes3:8b:      {provider: ollama, size_class: small, context: 8192, notes: "NousResearch Hermes 3 8B — worker substrate, 274 tok/s"}
+  qwen2.5:1.5b:    {provider: ollama, size_class: edge,  context: 8192, notes: "benchmark model"}
+  qwen-7b-instruct:{provider: ollama, size_class: small, context: 8192, notes: "optional pull"}

@@ -1,0 +1,8 @@
+id: flight-vllm-runtime-test-v001
+name: vLLM Runtime Test
+node_role: defendablecloud-test-node
+runtime_targets: [vllm]
+checks: [runtime_image, blackwell_sm120, model_serve, openai_compat, throughput_concurrency, receipt_write]
+notes: "Validated: vllm/vllm-openai serves on RTX 5090 sm_120; ~3476 tok/s at N=16 (5.6x Ollama)."
+receipt_required: true
+verdicts: {pass: HONEY, warning: JELLY, fail: PROPOLIS}

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -u
+ROOT="${DEFENDABLEOS_ROOT:-/opt/defendableos}"
+echo "=== DEFENDABLE NODE HEALTH ==="
+[ -f "$ROOT/node/node.env" ] && grep -E "NODE_ID|HOSTNAME|STATUS|ROLE" "$ROOT/node/node.env" | sed 's/^/  /' || echo "  node: NOT initialized (run defendable-node-init)"
+echo "-- gpu --"; nvidia-smi --query-gpu=name,temperature.gpu,power.draw,memory.used,memory.total --format=csv,noheader 2>/dev/null | sed 's/^/  /' || echo "  no GPU"
+echo "-- runtimes --"
+curl -s -m3 http://localhost:11434/api/version >/dev/null 2>&1 && echo "  ollama: UP" || echo "  ollama: down"
+curl -s -m3 http://localhost:8000/v1/models   >/dev/null 2>&1 && echo "  vllm: UP"   || echo "  vllm: down"
+echo "-- agent --"
+[ -d "$ROOT/agents/hermes-agent" ] && echo "  hermes-agent: present" || echo "  hermes-agent: MISSING"
+echo "-- kit --"
+echo "  flightsheets: $(ls "$ROOT"/flightsheets/*.yaml 2>/dev/null | wc -l) · assignments: $(ls "$ROOT"/assignments/*.yaml 2>/dev/null | wc -l) · receipts: $(ls "$ROOT"/receipts/*.txt 2>/dev/null | wc -l)"
+echo "-- disk --"; df -h / | awk 'NR==2{print "  "$4" free of "$2}'

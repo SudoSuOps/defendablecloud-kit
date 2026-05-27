@@ -1,0 +1,7 @@
+id: flight-rig-smoke-test-v001
+name: Rig Smoke Test
+node_role: defendablecloud-test-node
+runtime_targets: [ollama]
+checks: [node_identity, gpu_metrics, thermal_power, disk_free, model_load, inference_throughput, receipt_write]
+receipt_required: true
+verdicts: {pass: HONEY, warning: JELLY, fail: PROPOLIS}

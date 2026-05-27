@@ -1,50 +1,57 @@
 # DefendableCloud Kit
 
-The portable runtime for a **DefendableCloud Node** — the engine room you drop on a box
-(owner-compute, hosted, or hybrid) to make it run *defendable* agentic work.
+The installable runtime that turns any rig into a **DefendableCloud Node** — the engine room
+for running *defendable* agentic work (owner-compute, hosted, or hybrid).
 
 > DefendableCore runs it · DefendableRouter routes it · DefendableOS verifies it · DefendableCloud proves it.
+> **Hermes can be the first worker, but DefendableOS owns the rulebook.**
 
-## What's in the kit
+## The doctrine
+| | |
+|---|---|
+| **Flightsheet** | how the work should be flown (the plan / rulebook) |
+| **Assignment** | the specific mission (the work order) |
+| **Run** | what actually happened |
+| **Receipt** | proof it happened |
+| **Verdict** | HONEY (pass) · JELLY (warning) · PROPOLIS (fail) |
+
+## Kit layout
 ```
-flightsheets/        the rulebooks — declared, deterministic eval specs (50)
-assignments/         tasks issued to agents (filled at runtime)
-skills/              Hermes skills — defendable-cloud-eval (run the eval lane)
-bin/                 node_eval_runner.py — repeatable, schema-enforced evals
-install.sh           lays the kit out into the runtime root
-defendablelogo.png   the brand mark
+defendablecloud-kit/
+├── install.sh              lay the kit onto a node + init it
+├── node.env.example
+├── flightsheets/           node/runtime plans (YAML)
+│   ├── rig-smoke-test.yaml  hermes-agent-eval.yaml
+│   ├── sglang-runtime-test.yaml  vllm-runtime-test.yaml  openclaw-redteam.yaml
+│   └── cloud/              the 50 Cloud eval rulebooks (JSON) — agent-work evals
+├── assignments/            work orders (YAML): node-readiness, hermes-memory, runtime-compare, agent-safety
+├── configs/                models.yaml · runtimes.yaml · policy.yaml
+├── skills/defendable-cloud-eval/   Hermes skill — run the Cloud eval lane
+├── bin/                    defendable-node-init · defendable-health · defendable-run · defendable-receipt · node_eval_runner.py
+└── systemd/                defendable-agent.service · defendable-runner.service
 ```
 
-## Installed runtime layout (`/opt/defendableos`)
+## Installed runtime (`/opt/defendableos`)
 ```
-/opt/defendableos
-├── flightsheets/    rulebooks (installed from the kit)
-├── assignments/     issued assignments
-├── agents/
-│   └── hermes-agent (pinned worker — source receipted before it runs work)
-├── receipts/        proof ledger (commit receipts, incident receipts, …)
-└── node_eval_runner.py
+node/ (node.env, identity.json) · agents/hermes-agent · flightsheets/ (+cloud/)
+assignments/ · configs/ · models/ · runs/ · receipts/ · logs/ · bin/
 ```
 
-## Install
+## Install & run
 ```bash
 git clone git@github.com:SudoSuOps/defendablecloud-kit.git ~/defendablecloud-kit
-cd ~/defendablecloud-kit && ./install.sh
+cd ~/defendablecloud-kit && bash install.sh mrd.defendable.eth
+export PATH="/opt/defendableos/bin:$PATH"
+defendable-health
+defendable-run assignment-001-node-readiness.yaml      # → run/ + receipt + VERDICT
+defendable-receipt list
 ```
-Override the root with `DEFENDABLEOS_ROOT=/path ./install.sh`.
 
-## Run an eval (schema-enforced by default)
-```bash
-JWT=<token> python3 /opt/defendableos/node_eval_runner.py \
-    --sheet cre_memo_dscr_ltv_v1 --model hermes3:8b --tier small
-# --no-constrain reproduces the free-form 'before' (format-masking)
-```
-The runner generates the agent submission under **grammar-constrained decoding** against the
-flight sheet's required shape, so the referee measures capability (math/policy), not JSON format.
-
-## Doctrine
-- The referee is a **rulebook, not a judge** — math and code, flags not opinions.
-- Agent source is **pinned + read before it runs work**.
-- Agents **earn their lanes** by receipts; a human holds final authority before any receipt issues.
-- Three flag classes: **work-defect** (fix & resubmit) · **deal-finding** (a true result) ·
-  **stack-fit** (wrong model/compute for the lane — escalate, don't paper over).
+## Notes
+- `defendable-run` is deterministic and node-level: it loads the assignment, finds its
+  flightsheet, runs the declared `checks`, and writes `runs/<id>/{report.md,result.json}` +
+  a hashed `receipts/<id>.txt` with a verdict. Unimplemented checks are honestly `skip`ped.
+- The Cloud agent-work eval lane (CRE underwriting etc.) is `bin/node_eval_runner.py` against
+  `flightsheets/cloud/*.json` — schema-enforced by default.
+- Governance (`configs/policy.yaml`): human approval before receipts/client output, no outbound,
+  agent source pinned, agents earn lanes. Controllable autonomy.

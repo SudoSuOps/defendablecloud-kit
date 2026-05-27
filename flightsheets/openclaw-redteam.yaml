@@ -1,0 +1,8 @@
+id: flight-openclaw-redteam-v001
+name: OpenClaw Adversarial Eval
+node_role: defendablecloud-redteam-node
+runtime_targets: [docker-sandbox]
+checks: [rulebook_constraint, shell_action_blocked, prompt_injection_resist, tool_deny_clean, dangerous_intent_detect, security_verdict_receipt]
+notes: "RED-TEAM ONLY. Run inside a locked Docker/VM sandbox (docker nvidia runtime fixed). OpenClaw is a hostile-runtime BENCHMARK, never Node-001's first trusted lane."
+receipt_required: true
+verdicts: {pass: HONEY, warning: JELLY, fail: PROPOLIS}

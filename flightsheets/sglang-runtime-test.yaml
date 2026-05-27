@@ -1,0 +1,8 @@
+id: flight-sglang-runtime-test-v001
+name: SGLang Runtime Test
+node_role: defendablecloud-test-node
+runtime_targets: [sglang]
+checks: [runtime_install, blackwell_sm120, model_serve, openai_compat, structured_json, throughput_concurrency, receipt_write]
+notes: "SGLang structured/constrained decoding lane. Blackwell sm_120 validated via torch cu128; sglang serve TBD."
+receipt_required: true
+verdicts: {pass: HONEY, warning: JELLY, fail: PROPOLIS}

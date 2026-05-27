@@ -1,0 +1,9 @@
+# Node governance — controllable autonomy (declared rulebook, not opinion)
+policy:
+  human_approval_required_for: [client_facing_output, receipt_issuance, autonomous_external_action, financial_decision]
+  outbound_messaging: disabled
+  agent_source: "must be pinned + read before running work"
+  lanes:
+    earned_rule: ">=3 honey & 0 propolis = approved; 1 propolis = restricted; recurring = blocked"
+  flag_classes: [work_defect, deal_finding, stack_fit]
+  doctrine: "The referee is a rulebook, not a judge. Agents earn their lanes. A human holds final authority."

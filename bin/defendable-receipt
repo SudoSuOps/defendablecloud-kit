@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -u
+ROOT="${DEFENDABLEOS_ROOT:-/opt/defendableos}"
+case "${1:-list}" in
+  list) echo "=== receipts ==="; ls -1t "$ROOT"/receipts/*.txt 2>/dev/null | head -20 ;;
+  show) cat "$ROOT/receipts/$2" 2>/dev/null || echo "not found: $2" ;;
+  *) echo "usage: defendable-receipt [list | show <file>]" ;;
+esac

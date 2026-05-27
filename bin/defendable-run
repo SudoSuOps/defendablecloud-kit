@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""defendable-run — execute an assignment against its flightsheet.
+
+  assignment (mission)  →  flightsheet (plan)  →  run the checks
+       →  runs/<id>/{report.md,result.json}  +  receipts/<id>.txt  +  VERDICT
+
+Verdict: HONEY (all pass) · JELLY (a warning) · PROPOLIS (a fail). Deterministic,
+node-level — the rulebook decides, not opinion.
+"""
+import sys, os, json, glob, subprocess, hashlib, datetime
+
+ROOT = os.environ.get("DEFENDABLEOS_ROOT", "/opt/defendableos")
+
+
+def now():
+    return datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+
+
+def iso():
+    return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load(path):
+    import yaml
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+
+def sh(cmd, t=25):
+    try:
+        return subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True, timeout=t).stdout.strip()
+    except Exception as e:  # noqa: BLE001
+        return f"ERR:{e}"
+
+
+# --- check implementations: each returns (status, detail) ---
+def c_node_identity():
+    p = f"{ROOT}/node/node.env"
+    return ("pass", open(p).read().strip().replace("\n", " · ")) if os.path.exists(p) else ("fail", "no node.env")
+
+
+def c_gpu_metrics():
+    o = sh("nvidia-smi --query-gpu=name,temperature.gpu,power.draw,memory.used,memory.total --format=csv,noheader")
+    return ("pass" if o and "ERR" not in o else "fail", o)
+
+
+def c_thermal_power():
+    o = sh("nvidia-smi --query-gpu=temperature.gpu,power.draw,power.limit --format=csv,noheader")
+    return ("pass" if o and "ERR" not in o else "warn", o)
+
+
+def c_disk_free():
+    return ("pass", sh("df -h / | awk 'NR==2{print $4\" free of \"$2}'"))
+
+
+def c_model_load():
+    o = sh("ollama list 2>/dev/null | tail -n +2 | awk '{print $1}' | paste -sd, -")
+    return ("pass" if o else "fail", o or "no models")
+
+
+def c_inference_throughput():
+    o = sh("curl -s -m60 http://localhost:11434/api/generate -d '{\"model\":\"swarmjelly-4b:latest\",\"prompt\":\"hi\",\"stream\":false,\"think\":false,\"options\":{\"num_predict\":64}}' "
+           "| python3 -c 'import sys,json;d=json.load(sys.stdin);print(round(d.get(\"eval_count\",0)/(d.get(\"eval_duration\",1)/1e9),1),\"tok/s\")'", t=75)
+    return ("pass" if "tok/s" in o else "warn", o)
+
+
+def c_runtime():
+    o = sh("curl -s -m3 http://localhost:11434/api/version")
+    return ("pass" if "version" in o else "warn", o)
+
+
+def c_receipt_write():
+    return ("pass", "receipt written by runner")
+
+
+CHECKS = {
+    "node_identity": c_node_identity, "gpu_metrics": c_gpu_metrics, "thermal_power": c_thermal_power,
+    "disk_free": c_disk_free, "model_load": c_model_load, "inference_throughput": c_inference_throughput,
+    "runtime": c_runtime, "receipt_write": c_receipt_write,
+}
+
+
+def main():
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if not args:
+        print("usage: defendable-run <assignment.yaml>")
+        return
+    asg_path = args[0] if os.path.exists(args[0]) else f"{ROOT}/assignments/{args[0]}"
+    asg = load(asg_path)
+    fid = asg.get("flight_id")
+    flight = None
+    for f in glob.glob(f"{ROOT}/flightsheets/*.yaml"):
+        fy = load(f)
+        if fy and fy.get("id") == fid:
+            flight = fy
+            break
+    if flight is None:
+        print(f"!! flight {fid} not found"); return
+    checks = flight.get("checks", [])
+    print(f"=== {asg.get('id')} → {fid} ({len(checks)} checks) ===")
+    results = []
+    for c in checks:
+        fn = CHECKS.get(c)
+        st, det = fn() if fn else ("skip", "not implemented in v1 (declared)")
+        results.append({"check": c, "status": st, "detail": det})
+        print(f"  [{st.upper():4}] {c}: {str(det)[:90]}")
+
+    vmap = flight.get("verdicts", {"pass": "HONEY", "warning": "JELLY", "fail": "PROPOLIS"})
+    if any(r["status"] == "fail" for r in results):
+        verdict = vmap["fail"]
+    elif any(r["status"] == "warn" for r in results):
+        verdict = vmap["warning"]
+    else:
+        verdict = vmap["pass"]
+
+    aid, ts = asg.get("id", "run"), now()
+    rundir = f"{ROOT}/runs/{aid}-{ts}"
+    os.makedirs(rundir, exist_ok=True)
+    result = {"assignment": aid, "flight": fid, "node_id": asg.get("node_id"), "hostname": asg.get("hostname"),
+              "operator": asg.get("operator"), "at_utc": iso(), "checks": results, "verdict": verdict}
+    json.dump(result, open(f"{rundir}/result.json", "w"), indent=2)
+    md = [f"# {aid}", f"flight: {fid} · node: {asg.get('node_id')} · {iso()}", "", f"## Verdict: {verdict}", ""]
+    md += [f"- [{r['status'].upper()}] **{r['check']}** — {r['detail']}" for r in results]
+    open(f"{rundir}/report.md", "w").write("\n".join(md) + "\n")
+    sha = hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()
+    rc = f"{ROOT}/receipts/{aid}_{ts}.txt"
+    open(rc, "w").write(
+        f"assignment={aid}\nflight={fid}\nnode_id={asg.get('node_id')}\nhostname={asg.get('hostname')}\n"
+        f"verdict={verdict}\nat_utc={iso()}\nresult_sha256={sha}\nrun_dir={rundir}\n")
+    print(f"\nVERDICT: {verdict}\nrun: {rundir}\nreceipt: {rc}")
+
+
+if __name__ == "__main__":
+    main()

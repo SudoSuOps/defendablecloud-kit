@@ -1,0 +1,7 @@
+# Serving runtimes available on this node (all OpenAI-compatible /v1)
+runtimes:
+  ollama:    {status: live,       endpoint: "http://localhost:11434", constrained_json: "format schema (GBNF)", lane: "dev/worker/single-stream", note: "274 tok/s hermes3:8b"}
+  vllm:      {status: validated,  endpoint: "http://localhost:8000",  constrained_json: "response_format json_schema", lane: "hosted/concurrent", note: "Blackwell sm_120 OK; 3476 tok/s @ N=16 (5.6x Ollama)"}
+  sglang:    {status: planned,    endpoint: "http://localhost:30000", constrained_json: "xgrammar", lane: "structured-output eval", note: "Blackwell-validate before claiming"}
+  llama_cpp: {status: optional,   endpoint: "http://localhost:8080",  constrained_json: "GBNF", lane: "owner_edge / CPU"}
+gpu: {name: "RTX 5090", vram_gb: 32, sm: "120 (Blackwell)", power_limit_w: 550}

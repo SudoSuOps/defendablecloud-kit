@@ -1,0 +1,8 @@
+id: flight-hermes-agent-eval-v001
+name: Hermes Agent Evaluation
+node_role: defendablecloud-test-node
+runtime_targets: [ollama, sglang, vllm]
+models: [swarmjelly-4b, hermes3:8b, qwen-7b-instruct]
+checks: [model_load, tool_use, memory_write, json_validity, receipt_write, gpu_metrics]
+receipt_required: true
+verdicts: {pass: HONEY, warning: JELLY, fail: PROPOLIS}

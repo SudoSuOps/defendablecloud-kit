@@ -1,0 +1,14 @@
+[Unit]
+Description=DefendableCloud Agent (Hermes worker)
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=swarm
+WorkingDirectory=/opt/defendableos/agents/hermes-agent
+EnvironmentFile=/opt/defendableos/node/node.env
+ExecStart=/bin/bash -lc 'echo "agent service placeholder — wire hermes gateway here"; sleep infinity'
+Restart=on-failure
+RestartSec=10
+[Install]
+WantedBy=multi-user.target
