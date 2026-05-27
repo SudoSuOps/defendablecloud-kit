@@ -1,0 +1,206 @@
+{
+  "slug": "dataset_content_safety_scan_v1",
+  "name": "Content Safety and PII Scan",
+  "version": "1.0",
+  "lane": "dataset",
+  "summary": "Scan a dataset for personally identifiable information (PII), toxic content, and unsafe material",
+  "purpose": "Scan a dataset for personally identifiable information (PII), toxic content, and unsafe material. Report detection counts and rates with evidence.",
+  "assignment_instructions": "You are scanning a dataset for content safety issues including PII, toxic content, and unsafe material. REQUIRED OUTPUT: Return a JSON object with these exact fields: - assignment_id (string): use \"dataset_content_safety_scan_v1\" - agent_summary (string) - inputs_used (list of strings) - missing_inputs (list of strings) - claims (list of objects): claim, evidence_reference, confidence (\"provided\"|\"inferred\"|\"missing\") - calculations (list of objects): name, formula, inputs, result, units, assumptions - risks (list of objects): risk, severity (\"low\"|\"medium\"|\"high\"), evidence_reference - assumptions (list of strings) - open_questions (list of strings) - final_output (string) - self_check (object): all_required_sections_completed (boolean), all_numbers_have_sources (boolean), assumptions_labeled (boolean), missing_inputs_disclosed (boolean) Also include: - total_rows_scanned (integer) - pii_detected (boolean): whether any PII was found - pii_field_count (integer): number of columns/fields containing PII - pii_fields (list of strings): names of fields where PII was detected - pii_row_count (integer): number of rows containing PII - pii_rate (number): pii_row_count / total_rows_scanned - toxic_content_detected (boolean): whether toxic content was found - toxic_content_count (integer): number of toxic samples - toxic_content_rate (number): toxic_content_count / total_rows_scanned - unsafe_flag_count (integer): total count of unsafe material flags - safety_score (number between 0 and 1): max(0, 1 - (pii_rate + toxic_content_rate + unsafe_rate)) - remediation_required (boolean): true if pii_rate > 0.01 or toxic_content_rate > 0.05 or unsafe_flag_count > 0 Compute pii_rate as pii_row_count / total_rows_scanned. Compute toxic_content_rate as toxic_content_count / total_rows_scanned. Return numeric values as numbers, not prose. Include all formulas in calculations array. Use only the provided evidence unless explicitly allowed to assume; label every assumption; if a required input is missing, say so; do not fabricate facts or cite evidence that was not provided.",
+  "required_inputs": [
+    "dataset_or_scan_report",
+    "pii_patterns_or_scanner_config",
+    "total_rows"
+  ],
+  "expected_outputs": [
+    "assignment_id",
+    "total_rows_scanned",
+    "pii_detected",
+    "pii_field_count",
+    "pii_row_count",
+    "pii_rate",
+    "toxic_content_detected",
+    "toxic_content_count",
+    "toxic_content_rate",
+    "unsafe_flag_count",
+    "safety_score",
+    "remediation_required",
+    "claims",
+    "self_check"
+  ],
+  "audit_checks": [
+    {
+      "key": "sections_present",
+      "label": "Required sections present",
+      "category": "structure",
+      "kind": "auto",
+      "severity": "critical"
+    },
+    {
+      "key": "output_nonempty",
+      "label": "Output is substantive",
+      "category": "structure",
+      "kind": "auto",
+      "severity": "noncritical"
+    },
+    {
+      "key": "pii_detected_high",
+      "label": "Pii detected high",
+      "category": "policy",
+      "kind": "checklist",
+      "severity": "critical"
+    },
+    {
+      "key": "pii_detected_low",
+      "label": "Pii detected low",
+      "category": "policy",
+      "kind": "checklist",
+      "severity": "noncritical"
+    },
+    {
+      "key": "toxic_content_high",
+      "label": "Toxic content high",
+      "category": "policy",
+      "kind": "checklist",
+      "severity": "critical"
+    },
+    {
+      "key": "toxic_content_low",
+      "label": "Toxic content low",
+      "category": "policy",
+      "kind": "checklist",
+      "severity": "noncritical"
+    },
+    {
+      "key": "unsafe_material",
+      "label": "Unsafe material",
+      "category": "policy",
+      "kind": "checklist",
+      "severity": "critical"
+    }
+  ],
+  "pass_threshold": 80,
+  "fail_threshold": 60,
+  "eval_spec": {
+    "required_output_schema": {
+      "type": "object",
+      "required": [
+        "assignment_id",
+        "total_rows_scanned",
+        "pii_detected",
+        "pii_field_count",
+        "pii_row_count",
+        "pii_rate",
+        "toxic_content_detected",
+        "toxic_content_count",
+        "toxic_content_rate",
+        "unsafe_flag_count",
+        "safety_score",
+        "remediation_required",
+        "claims",
+        "self_check"
+      ]
+    },
+    "deterministic_checks": [
+      {
+        "check_id": "pii_rate_formula",
+        "description": "pii_rate must equal pii_row_count / total_rows_scanned",
+        "assertion": "result.pii_rate == result.pii_row_count / result.total_rows_scanned"
+      },
+      {
+        "check_id": "toxic_rate_formula",
+        "description": "toxic_content_rate must equal toxic_content_count / total_rows_scanned",
+        "assertion": "result.toxic_content_rate == result.toxic_content_count / result.total_rows_scanned"
+      },
+      {
+        "check_id": "safety_score_range",
+        "description": "safety_score must be between 0.0 and 1.0",
+        "assertion": "0.0 <= result.safety_score <= 1.0"
+      },
+      {
+        "check_id": "remediation_flag_logic",
+        "description": "remediation_required must be true when thresholds exceeded",
+        "assertion": "result.remediation_required == (result.pii_rate > 0.01 or result.toxic_content_rate > 0.05 or result.unsafe_flag_count > 0)"
+      },
+      {
+        "check_id": "pii_consistency",
+        "description": "If pii_detected is false, pii_row_count must be 0",
+        "assertion": "(not result.pii_detected) implies (result.pii_row_count == 0)"
+      },
+      {
+        "check_id": "toxic_consistency",
+        "description": "If toxic_content_detected is false, toxic_content_count must be 0",
+        "assertion": "(not result.toxic_content_detected) implies (result.toxic_content_count == 0)"
+      }
+    ],
+    "math_checks": [
+      {
+        "formula_id": "pii_rate",
+        "formula": "pii_row_count / total_rows_scanned",
+        "description": "Fraction of rows containing PII",
+        "output_field": "pii_rate"
+      },
+      {
+        "formula_id": "toxic_content_rate",
+        "formula": "toxic_content_count / total_rows_scanned",
+        "description": "Fraction of rows containing toxic content",
+        "output_field": "toxic_content_rate"
+      },
+      {
+        "formula_id": "safety_score",
+        "formula": "max(0, 1 - (pii_rate + toxic_content_rate + unsafe_rate))",
+        "description": "Composite safety score from 0 (unsafe) to 1 (clean)",
+        "output_field": "safety_score"
+      }
+    ],
+    "evidence_checks": [
+      {
+        "evidence_field": "pii_fields",
+        "description": "Must list specific column/field names where PII was found",
+        "required": true
+      },
+      {
+        "evidence_field": "pii_row_count",
+        "description": "Must be exact count with evidence reference",
+        "required": true
+      },
+      {
+        "evidence_field": "toxic_content_count",
+        "description": "Must be exact count with evidence reference",
+        "required": true
+      }
+    ],
+    "flag_rules": [
+      {
+        "flag_id": "pii_detected_high",
+        "condition": "pii_rate > 0.05",
+        "severity": "high",
+        "description": "More than 5% of rows contain PII"
+      },
+      {
+        "flag_id": "pii_detected_low",
+        "condition": "pii_rate > 0 and pii_rate <= 0.05",
+        "severity": "medium",
+        "description": "PII detected in up to 5% of rows"
+      },
+      {
+        "flag_id": "toxic_content_high",
+        "condition": "toxic_content_rate > 0.05",
+        "severity": "high",
+        "description": "More than 5% of rows contain toxic content"
+      },
+      {
+        "flag_id": "toxic_content_low",
+        "condition": "toxic_content_rate > 0 and toxic_content_rate <= 0.05",
+        "severity": "medium",
+        "description": "Toxic content detected in up to 5% of rows"
+      },
+      {
+        "flag_id": "unsafe_material",
+        "condition": "unsafe_flag_count > 0",
+        "severity": "high",
+        "description": "Unsafe material flags detected"
+      }
+    ],
+    "rules": []
+  }
+}

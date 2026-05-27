@@ -1,0 +1,306 @@
+{
+  "slug": "evx_temporal_fact_sequencing_v1",
+  "name": "Temporal Fact Sequencing",
+  "version": "1.0",
+  "lane": "agent",
+  "summary": "Evaluate the agent's ability to extract dated facts from documents, sequence them chronologically, and identify temporal gaps or missing dates",
+  "purpose": "Evaluate the agent's ability to extract dated facts from documents, sequence them chronologically, and identify temporal gaps or missing dates. The agent must parse various date formats and associate each date with the correct event.",
+  "assignment_instructions": "Extract all dated facts from the provided source documents and sequence them chronologically.\nFor each dated fact, return an object with exactly these fields: - \"date\": the date in ISO 8601 format (YYYY-MM-DD) if parseable; for ranges use the start date; for imprecise dates use the earliest possible date; for relative dates, resolve based on context - \"date_original\": the original date text as it appeared in the document - \"date_precision\": one of [\"exact\", \"month_only\", \"quarter_only\", \"year_only\", \"relative\", \"range_start\", \"ambiguous\"] - \"event\": a brief description of the event associated with the date (max 150 chars) - \"source_document\": identifier of the document (\"doc_1\", \"doc_2\", etc.) - \"gap_flag\": boolean \u2014 set to true if this event marks the start or end of a chronological gap > 6 months from the previous/next event\nAdditionally, compute and return: - \"timeline_gaps\": an array of objects describing identified gaps, each with \"gap_start_date\", \"gap_end_date\", \"gap_duration_months\" (number), and \"description\"\nReturn ONLY a JSON object with this exact shape: {\n  \"assignment_id\": \"evx_temporal_fact_sequencing_v1\",\n  \"agent_summary\": \"<summary of timeline extraction>\",\n  \"inputs_used\": [\"<document identifiers>\"],\n  \"missing_inputs\": [],\n  \"timeline\": [\n    {\"date\": \"2024-03-15\", \"date_original\": \"March 15, 2024\", \"date_precision\": \"exact\", \"event\": \"Product launch\", \"source_document\": \"doc_1\", \"gap_flag\": false}\n  ],\n  \"timeline_gaps\": [\n    {\"gap_start_date\": \"2023-06-01\", \"gap_end_date\": \"2024-01-15\", \"gap_duration_months\": 7.5, \"description\": \"No events recorded between June 2023 and January 2024\"}\n  ],\n  \"claims\": [],\n  \"calculations\": [],\n  \"risks\": [],\n  \"assumptions\": [],\n  \"open_questions\": [],\n  \"final_output\": \"<summary>\",\n  \"self_check\": {\n    \"all_required_sections_completed\": true,\n    \"all_numbers_have_sources\": true,\n    \"assumptions_labeled\": true,\n    \"missing_inputs_disclosed\": true\n  }\n}\nRules: - Timeline must be sorted chronologically by date (ascending). - Extract EVERY dated event; do not skip any. - Normalize all dates to ISO 8601 YYYY-MM-DD format. - For relative dates (\"last month\", \"the following year\"), resolve using the nearest reference date in the document. - gap_flag should be true for events immediately before or after a >6-month gap. - timeline_gaps must contain all chronological gaps exceeding 6 months. - If a date is unresolvable, use \"date\": null, \"date_precision\": \"ambiguous\", and explain in assumptions. Use only the provided evidence unless explicitly allowed to assume; label every assumption; if a required input is missing, say so; do not fabricate facts or cite evidence that was not provided.",
+  "required_inputs": [
+    "source_documents"
+  ],
+  "expected_outputs": [
+    "assignment_id",
+    "timeline",
+    "timeline_gaps",
+    "inputs_used",
+    "missing_inputs",
+    "self_check"
+  ],
+  "audit_checks": [
+    {
+      "key": "sections_present",
+      "label": "Required sections present",
+      "category": "structure",
+      "kind": "auto",
+      "severity": "critical"
+    },
+    {
+      "key": "citations_present",
+      "label": "Evidence is referenced",
+      "category": "evidence",
+      "kind": "auto",
+      "severity": "noncritical"
+    },
+    {
+      "key": "timeline_not_sorted",
+      "label": "Timeline not sorted",
+      "category": "policy",
+      "kind": "checklist",
+      "severity": "noncritical"
+    },
+    {
+      "key": "invalid_date_precision",
+      "label": "Invalid date precision",
+      "category": "policy",
+      "kind": "checklist",
+      "severity": "noncritical"
+    },
+    {
+      "key": "invalid_date_format",
+      "label": "Invalid date format",
+      "category": "structure",
+      "kind": "checklist",
+      "severity": "noncritical"
+    },
+    {
+      "key": "fabricated_event",
+      "label": "Fabricated event",
+      "category": "policy",
+      "kind": "checklist",
+      "severity": "noncritical"
+    },
+    {
+      "key": "incorrect_gap_duration",
+      "label": "Incorrect gap duration",
+      "category": "math",
+      "kind": "checklist",
+      "severity": "noncritical"
+    },
+    {
+      "key": "missing_gap_flag",
+      "label": "Missing gap flag",
+      "category": "structure",
+      "kind": "checklist",
+      "severity": "noncritical"
+    },
+    {
+      "key": "unreferenced_source",
+      "label": "Unreferenced source",
+      "category": "evidence",
+      "kind": "checklist",
+      "severity": "noncritical"
+    },
+    {
+      "key": "self_check_false",
+      "label": "Self check false",
+      "category": "policy",
+      "kind": "checklist",
+      "severity": "noncritical"
+    }
+  ],
+  "pass_threshold": 80,
+  "fail_threshold": 60,
+  "eval_spec": {
+    "required_output_schema": {
+      "type": "object",
+      "required": [
+        "assignment_id",
+        "timeline",
+        "timeline_gaps",
+        "inputs_used",
+        "missing_inputs",
+        "self_check"
+      ],
+      "properties": {
+        "assignment_id": {
+          "type": "string",
+          "const": "evx_temporal_fact_sequencing_v1"
+        },
+        "timeline": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "date",
+              "date_original",
+              "date_precision",
+              "event",
+              "source_document",
+              "gap_flag"
+            ],
+            "properties": {
+              "date": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+              },
+              "date_original": {
+                "type": "string",
+                "minLength": 1
+              },
+              "date_precision": {
+                "type": "string",
+                "enum": [
+                  "exact",
+                  "month_only",
+                  "quarter_only",
+                  "year_only",
+                  "relative",
+                  "range_start",
+                  "ambiguous"
+                ]
+              },
+              "event": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source_document": {
+                "type": "string"
+              },
+              "gap_flag": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "timeline_gaps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "gap_start_date",
+              "gap_end_date",
+              "gap_duration_months",
+              "description"
+            ],
+            "properties": {
+              "gap_start_date": {
+                "type": "string",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+              },
+              "gap_end_date": {
+                "type": "string",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+              },
+              "gap_duration_months": {
+                "type": "number",
+                "minimum": 0
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "inputs_used": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "missing_inputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "self_check": {
+          "type": "object",
+          "required": [
+            "all_required_sections_completed",
+            "all_numbers_have_sources",
+            "assumptions_labeled",
+            "missing_inputs_disclosed"
+          ]
+        }
+      }
+    },
+    "deterministic_checks": [
+      {
+        "description": "Timeline array must be sorted chronologically by date (ascending).",
+        "method": "Iterate timeline and assert each date >= previous date (nulls handled gracefully)."
+      },
+      {
+        "description": "All date_precision values must be in [exact, month_only, quarter_only, year_only, relative, range_start, ambiguous].",
+        "method": "Enum validation against schema."
+      },
+      {
+        "description": "All non-null dates must match ISO 8601 YYYY-MM-DD pattern.",
+        "method": "Regex validation ^\\d{4}-\\d{2}-\\d{2}$."
+      },
+      {
+        "description": "Every timeline entry must reference a source_document present in inputs_used.",
+        "method": "Cross-reference timeline[].source_document against inputs_used."
+      },
+      {
+        "description": "timeline_gaps gap_duration_months must equal the month difference between gap_start_date and gap_end_date (approximate is acceptable).",
+        "method": "Date arithmetic verification."
+      },
+      {
+        "description": "timeline_gaps entries must only exist if there is a chronological gap > 6 months.",
+        "method": "Assert gap_duration_months > 6 for all timeline_gaps entries."
+      },
+      {
+        "description": "gap_flag must be true for events bounding a gap listed in timeline_gaps.",
+        "method": "Cross-reference gap_flag true events against timeline_gaps boundaries."
+      }
+    ],
+    "math_checks": [
+      {
+        "description": "Verify gap_duration_months is arithmetically correct from gap_start_date and gap_end_date.",
+        "method": "Calculate months between dates and compare to stated gap_duration_months."
+      },
+      {
+        "description": "Verify relative date resolutions are mathematically correct (e.g., \"the following month\" from \"2024-01-15\" = \"2024-02-15\").",
+        "method": "Recalculate relative dates from context and compare."
+      }
+    ],
+    "evidence_checks": [
+      {
+        "description": "Random sample 25% of timeline entries; verify event description is supported by source text.",
+        "method": "Substring or semantic search event against source_documents."
+      },
+      {
+        "description": "Verify timeline_gaps correspond to actual gaps in the extracted timeline (not fabricated).",
+        "method": "Recalculate gaps from timeline array and compare to timeline_gaps."
+      }
+    ],
+    "flag_rules": [
+      {
+        "flag_id": "timeline_not_sorted",
+        "condition": "timeline is not in chronological order by date",
+        "severity": "honey"
+      },
+      {
+        "flag_id": "invalid_date_precision",
+        "condition": "date_precision not in allowed enum",
+        "severity": "honey"
+      },
+      {
+        "flag_id": "invalid_date_format",
+        "condition": "non-null date does not match YYYY-MM-DD pattern",
+        "severity": "honey"
+      },
+      {
+        "flag_id": "fabricated_event",
+        "condition": "event description not found in source document",
+        "severity": "honey"
+      },
+      {
+        "flag_id": "incorrect_gap_duration",
+        "condition": "gap_duration_months is off by >1 month from actual date difference",
+        "severity": "jelly"
+      },
+      {
+        "flag_id": "missing_gap_flag",
+        "condition": "timeline event bounds a gap but gap_flag is false",
+        "severity": "jelly"
+      },
+      {
+        "flag_id": "unreferenced_source",
+        "condition": "timeline[].source_document not in inputs_used",
+        "severity": "honey"
+      },
+      {
+        "flag_id": "self_check_false",
+        "condition": "any self_check boolean is false",
+        "severity": "jelly"
+      }
+    ],
+    "rules": []
+  }
+}
