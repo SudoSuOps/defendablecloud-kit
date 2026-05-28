@@ -18,7 +18,7 @@ cp "$KIT"/bin/*                     "$ROOT/bin/"                2>/dev/null && c
 cp "$KIT"/bin/node_eval_runner.py   "$ROOT/node_eval_runner.py" 2>/dev/null
 cp "$KIT"/defendablelogo.png "$ROOT/" 2>/dev/null
 cp "$KIT"/node.env.example "$ROOT/node/node.env.example" 2>/dev/null
-python3 -c "import yaml" 2>/dev/null || pip install --user -q pyyaml 2>/dev/null || pip3 install --user -q pyyaml 2>/dev/null
+python3 -c "import yaml, httpx" 2>/dev/null || pip install --user -q --break-system-packages pyyaml httpx 2>/dev/null || pip3 install --user -q pyyaml httpx 2>/dev/null
 if [ -d "$HOME/.hermes" ]; then mkdir -p "$HOME/.hermes/skills/domain"; cp -r "$KIT"/skills/defendable-cloud-eval "$HOME/.hermes/skills/domain/" 2>/dev/null; fi
 bash "$ROOT/bin/defendable-node-init" "$NODE_ID"
 echo "flightsheets: $(ls "$ROOT"/flightsheets/*.yaml 2>/dev/null|wc -l) · cloud-rulebooks: $(ls "$ROOT"/flightsheets/cloud/*.json 2>/dev/null|wc -l) · assignments: $(ls "$ROOT"/assignments/*.yaml 2>/dev/null|wc -l)"
