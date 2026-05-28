@@ -252,6 +252,17 @@ def main():
 
     checks = flight.get("checks", [])
     print(f"=== {asg.get('id')} → {fid} ({len(checks)} checks) ===")
+
+    # The rulebook must be enforceable. A check key the runner doesn't
+    # implement would silently "skip" at runtime and a sheet of all-skips
+    # could verdict HONEY — a false honey. Refuse to load instead.
+    unknown = [c for c in checks if c not in CHECKS]
+    if unknown:
+        print(f"!! flight {fid} declares checks the runner does not implement: {', '.join(unknown)}")
+        print(f"   known: {', '.join(sorted(CHECKS.keys()))}")
+        print(f"   refusing to run — a silently-skipped check is a false-honey risk.")
+        sys.exit(2)
+
     if repair:
         print(f"  repair loop: ON (max {max_repair} attempts)")
 

@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# refresh-rulebooks — vendor the canonical Cloud rulebooks into this kit.
+#
+# Source of truth: SudoSuOps/defendable-cloud-v2 → api/flight_sheets/ on main.
+# This script mirrors that directory into flightsheets/cloud/ here:
+#   - new sheets upstream  → copied in
+#   - changed sheets       → overwritten
+#   - sheets no longer upstream → removed locally
+# So the kit never silently drifts from the canon. The loader in
+# defendable-cloud-v2 already treats api/flight_sheets/ as source-of-truth
+# (upsert-by-slug + deactivate-anything-absent); this is the kit-side mirror
+# of that contract.
+#
+# Env overrides (rarely needed):
+#   RULEBOOK_REPO_URL  default https://github.com/SudoSuOps/defendable-cloud-v2.git
+#   RULEBOOK_REF       default main
+set -u
+
+KIT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEST="$KIT/flightsheets/cloud"
+REPO_URL="${RULEBOOK_REPO_URL:-https://github.com/SudoSuOps/defendable-cloud-v2.git}"
+REF="${RULEBOOK_REF:-main}"
+SRC_PATH="api/flight_sheets"
+
+command -v git >/dev/null || { echo "!! git required"; exit 1; }
+mkdir -p "$DEST"
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+echo "→ syncing $SRC_PATH from $REPO_URL@$REF"
+if ! git clone --depth 1 --branch "$REF" --filter=blob:none --no-checkout \
+        "$REPO_URL" "$TMP/repo" >/dev/null 2>&1; then
+  echo "!! clone failed (private upstream? set RULEBOOK_REPO_URL or check auth)"
+  exit 1
+fi
+
+(
+  cd "$TMP/repo"
+  git sparse-checkout init --cone >/dev/null
+  git sparse-checkout set "$SRC_PATH" >/dev/null
+  git checkout >/dev/null 2>&1
+)
+
+SRC="$TMP/repo/$SRC_PATH"
+[ -d "$SRC" ] || { echo "!! $SRC_PATH not present in $REPO_URL@$REF"; exit 1; }
+
+added=0; updated=0; unchanged=0; removed=0
+mapfile -t upstream < <(cd "$SRC" && ls -1 *.json 2>/dev/null)
+
+for name in "${upstream[@]}"; do
+  src="$SRC/$name"; dst="$DEST/$name"
+  if [ ! -f "$dst" ]; then
+    cp "$src" "$dst"; added=$((added+1))
+  elif cmp -s "$src" "$dst"; then
+    unchanged=$((unchanged+1))
+  else
+    cp "$src" "$dst"; updated=$((updated+1))
+  fi
+done
+
+declare -A want
+for name in "${upstream[@]}"; do want[$name]=1; done
+for f in "$DEST"/*.json; do
+  [ -e "$f" ] || continue
+  base="$(basename "$f")"
+  if [ -z "${want[$base]:-}" ]; then
+    rm "$f"; removed=$((removed+1))
+  fi
+done
+
+echo "synced ${#upstream[@]} sheets · $added added · $updated updated · $unchanged unchanged · $removed removed"

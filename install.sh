@@ -16,7 +16,7 @@ cp "$KIT"/assignments/*.yaml        "$ROOT/assignments/"        2>/dev/null
 cp "$KIT"/configs/*.yaml            "$ROOT/configs/"            2>/dev/null
 cp "$KIT"/bin/*                     "$ROOT/bin/"                2>/dev/null && chmod +x "$ROOT"/bin/*
 cp "$KIT"/bin/node_eval_runner.py   "$ROOT/node_eval_runner.py" 2>/dev/null
-cp "$KIT"/defendablelogo.png "$ROOT/" 2>/dev/null
+cp "$KIT"/docs/defendablelogo.png "$ROOT/" 2>/dev/null
 cp "$KIT"/node.env.example "$ROOT/node/node.env.example" 2>/dev/null
 python3 -c "import yaml, httpx" 2>/dev/null || pip install --user -q --break-system-packages pyyaml httpx 2>/dev/null || pip3 install --user -q pyyaml httpx 2>/dev/null
 if [ -d "$HOME/.hermes" ]; then mkdir -p "$HOME/.hermes/skills/domain"; cp -r "$KIT"/skills/defendable-cloud-eval "$HOME/.hermes/skills/domain/" 2>/dev/null; fi
