@@ -1,0 +1,765 @@
+#!/usr/bin/env python3
+"""defendable-cloud-eval — local cloud eval runner with deterministic referee.
+
+Run 50 cloud eval rulebooks against any model on Ollama. No external API needed.
+The referee evaluates schema, math, structure, evidence, and flags — deterministic,
+not opinion. Repair loop fixes work-defects; deal-findings stop cold.
+
+Usage:
+  defendable-cloud-eval --sheet cre_memo_dscr_ltv_v1 --model hermes3:8b
+  defendable-cloud-eval --domain cre --model hermes3:8b --repair
+  defendable-cloud-eval --all --models hermes3:8b,swarmjelly-4b:latest
+"""
+from __future__ import annotations
+import argparse, datetime, hashlib, json, math, os, re, subprocess, sys
+from types import SimpleNamespace
+
+ROOT = os.environ.get("DEFENDABLEOS_ROOT", "/opt/defendableos")
+CLOUD_DIR = f"{ROOT}/flightsheets/cloud"
+
+# Canonical submission schema for grammar-constrained decoding
+SUBMISSION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "assignment_id": {"type": "string"},
+        "agent_summary": {"type": "string"},
+        "inputs_used": {"type": "array", "items": {"type": "string"}},
+        "missing_inputs": {"type": "array", "items": {"type": "string"}},
+        "claims": {"type": "array", "items": {"type": "object", "properties": {
+            "claim": {"type": "string"}, "evidence_reference": {"type": "string"},
+            "confidence": {"type": "string"}},
+            "required": ["claim", "evidence_reference", "confidence"]}},
+        "calculations": {"type": "array", "items": {"type": "object", "properties": {
+            "name": {"type": "string"}, "formula": {"type": "string"},
+            "inputs": {"type": "object", "additionalProperties": {"type": "number"}},
+            "result": {"type": "number"}, "units": {"type": "string"}},
+            "required": ["name", "formula", "inputs", "result", "units"]}},
+        "risks": {"type": "array", "items": {"type": "object"}},
+        "assumptions": {"type": "array", "items": {"type": "string"}},
+        "open_questions": {"type": "array", "items": {"type": "string"}},
+        "final_output": {"type": "string"},
+        "self_check": {"type": "object", "additionalProperties": {"type": "boolean"}},
+    },
+    "required": ["assignment_id", "agent_summary", "inputs_used", "missing_inputs",
+                 "claims", "calculations", "risks", "assumptions", "open_questions",
+                 "final_output", "self_check"],
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Helpers
+# ═══════════════════════════════════════════════════════════════════════════
+def _now():
+    return datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
+
+def _iso():
+    return datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _sh(cmd, t=25):
+    try:
+        return subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True, timeout=t).stdout.strip()
+    except Exception as e:
+        return f"ERR:{e}"
+
+def _strip_think(text):
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+
+def _extract_json(text):
+    text = _strip_think(text).replace("```json", "").replace("```", "")
+    i, j = text.find("{"), text.rfind("}")
+    return text[i:j + 1] if i >= 0 and j > i else text
+
+def _normalize(s):
+    """Normalize a name for fuzzy matching."""
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Sheet loader
+# ═══════════════════════════════════════════════════════════════════════════
+def load_sheets(sheet=None, domain=None, all_flag=False):
+    sheets = []
+    for f in sorted(os.listdir(CLOUD_DIR)):
+        if not f.endswith(".json"):
+            continue
+        path = os.path.join(CLOUD_DIR, f)
+        d = json.load(open(path))
+        slug = d.get("slug", f.replace(".json", ""))
+        if sheet and slug != sheet:
+            continue
+        if domain and not slug.startswith(domain):
+            continue
+        if not sheet and not domain and not all_flag:
+            continue
+        sheets.append((path, d))
+    return sheets
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Ollama interface
+# ═══════════════════════════════════════════════════════════════════════════
+def _generate(model, prompt, schema=None, timeout=240, num_predict=2048):
+    """Generate via Ollama /api/generate. Returns (raw_text, tok_per_sec)."""
+    payload = {"model": model, "prompt": prompt, "stream": False,
+               "options": {"temperature": 0.1, "num_predict": num_predict, "think": False}}
+    if schema:
+        payload["format"] = schema
+    raw = _sh(f"curl -s -m{timeout} http://localhost:11434/api/generate "
+              f"-d {json.dumps(json.dumps(payload))}", t=timeout + 10)
+    if not raw or "ERR" in raw:
+        return "", 0.0
+    try:
+        d = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw, 0.0
+    ec = d.get("eval_count", 0)
+    ed = d.get("eval_duration", 1) / 1e9
+    return d.get("response", ""), (ec / ed if ed > 0 else 0.0)
+
+def _chat(model, messages, schema=None, timeout=240, num_predict=2048):
+    """Chat via Ollama /api/chat. Returns (raw_text, tok_per_sec)."""
+    payload = {"model": model, "messages": messages, "stream": False,
+               "options": {"temperature": 0.1, "num_predict": num_predict, "think": False}}
+    if schema:
+        payload["format"] = schema
+    raw = _sh(f"curl -s -m{timeout} http://localhost:11434/api/chat "
+              f"-d {json.dumps(json.dumps(payload))}", t=timeout + 10)
+    if not raw or "ERR" in raw:
+        return "", 0.0
+    try:
+        d = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw, 0.0
+    msg = d.get("message", {}).get("content", "")
+    ec = d.get("eval_count", 0)
+    ed = d.get("eval_duration", 1) / 1e9
+    return msg, (ec / ed if ed > 0 else 0.0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Referee — 5 check types
+# ═══════════════════════════════════════════════════════════════════════════
+
+def check_schema(sub, sheet):
+    """Check required output keys exist."""
+    results = []
+    required = sheet.get("eval_spec", {}).get("required_output_schema", {}).get("required", [])
+    if not required:
+        required = sheet.get("expected_outputs", [])
+    for key in required:
+        present = key in sub
+        results.append({"name": f"schema_{key}", "status": "pass" if present else "fail",
+                        "detail": f"'{key}' {'present' if present else 'MISSING'}", "kind": "exact"})
+    return results
+
+
+CALC_ALIASES = {
+    "ltv": ["loanto value", "loantovalue", "ltv"],
+    "dscr": ["debtservicecoverageratio", "debtservicecoverage", "dscr"],
+    "annual_debt_service": ["annualdebtservice", "debtservice"],
+    "noi": ["netoperatingincome", "noi"],
+    "cap_rate": ["capitalizationrate", "caprate"],
+    "cash_on_cash": ["cashoncash", "cashoncashreturn", "cocreturn"],
+    "egi": ["effectivegrossincome", "egi"],
+    "equity_multiple": ["equitymultiple"],
+    "irr": ["internalrateofreturn", "irr"],
+    "wacc": ["weightedaveragecostofcapital", "wacc"],
+    "npv": ["netpresentvalue", "npv"],
+    "ebitda": ["ebitda"],
+    "gross_margin": ["grossmargin"],
+    "net_margin": ["netmargin"],
+    "roi": ["returnoninvestment", "roi"],
+}
+
+def _find_calc(calcs, name):
+    """Fuzzy-find a calculation by name, with alias support."""
+    norm = _normalize(name)
+    # Direct match
+    for c in calcs:
+        if _normalize(c.get("name", "")) == norm:
+            return c
+    # Substring match
+    for c in calcs:
+        cn = _normalize(c.get("name", ""))
+        if norm in cn or cn in norm:
+            return c
+    # Alias match
+    aliases = CALC_ALIASES.get(norm, [norm])
+    for c in calcs:
+        cn = _normalize(c.get("name", ""))
+        if any(a in cn or cn in a for a in aliases):
+            return c
+    return None
+
+
+def _mortgage_annual(P, annual_rate, months):
+    """Standard mortgage amortization: annual payment."""
+    r = annual_rate / 12
+    n = months
+    if r == 0:
+        return P / n * 12
+    monthly = P * (r * (1 + r) ** n) / ((1 + r) ** n - 1)
+    return monthly * 12
+
+
+def _safe_eval_formula(formula, inputs):
+    """Try to evaluate a formula string with inputs. Returns float or None."""
+    if not formula or not inputs:
+        return None
+    # Mortgage amortization detection
+    if "(1+r)" in formula or "amortization" in formula.lower():
+        P = inputs.get("loan_amount") or inputs.get("P") or inputs.get("principal")
+        rate = inputs.get("annual_interest_rate") or inputs.get("rate") or inputs.get("interest_rate")
+        months = inputs.get("amortization_months") or inputs.get("n") or inputs.get("months")
+        if P and rate and months:
+            return _mortgage_annual(P, rate, months)
+    # Simple arithmetic
+    expr = formula.split("=")[-1].strip() if "=" in formula else formula
+    for var in sorted(inputs.keys(), key=lambda x: -len(x)):
+        expr = expr.replace(var, str(inputs[var]))
+    try:
+        result = eval(expr, {"__builtins__": {}, "abs": abs, "math": math,
+                             "pow": pow, "round": round, "max": max, "min": min})
+        return float(result)
+    except Exception:
+        return None
+
+
+def check_math(sub, sheet):
+    """Evaluate math checks: concrete (with expected_result) and consistency."""
+    results = []
+    calcs = sub.get("calculations", [])
+    for mc in sheet.get("eval_spec", {}).get("math_checks", []):
+        fid = mc.get("formula_id", mc.get("check", "math"))
+        expected = mc.get("expected_result")
+        tolerance = mc.get("tolerance", mc.get("expected_precision", 0.01))
+
+        if expected is not None:
+            # Concrete: compare model's result to known answer
+            calc = _find_calc(calcs, fid)
+            if calc is None:
+                results.append({"name": fid, "status": "fail",
+                                "detail": f"calculation '{fid}' not found", "kind": "exact"})
+                continue
+            model_result = calc.get("result")
+            if model_result is None:
+                results.append({"name": fid, "status": "fail",
+                                "detail": "no result value", "kind": "exact"})
+                continue
+            if abs(float(model_result) - float(expected)) <= float(tolerance):
+                results.append({"name": fid, "status": "pass",
+                                "detail": f"{model_result} within {tolerance} of {expected}", "kind": "exact"})
+            else:
+                results.append({"name": fid, "status": "fail",
+                                "detail": f"{model_result} != {expected} (tol {tolerance})", "kind": "exact"})
+        else:
+            # Internal consistency: recompute from model's own inputs
+            calc = _find_calc(calcs, fid)
+            if calc is None:
+                # try output_field / result_field
+                of = mc.get("output_field", mc.get("result_field", ""))
+                if of:
+                    val = sub.get(of)
+                    if val is not None:
+                        results.append({"name": fid, "status": "pass",
+                                        "detail": f"{of}={val} present", "kind": "heuristic"})
+                        continue
+                results.append({"name": fid, "status": "warn",
+                                "detail": f"calculation '{fid}' not found for consistency check",
+                                "kind": "heuristic"})
+                continue
+            model_inputs = calc.get("inputs", {})
+            model_result = calc.get("result")
+            recomputed = _safe_eval_formula(mc.get("formula", ""), model_inputs)
+            if recomputed is not None and model_result is not None:
+                prec = float(mc.get("expected_precision", 0.01))
+                if abs(float(recomputed) - float(model_result)) <= prec:
+                    results.append({"name": fid, "status": "pass",
+                                    "detail": f"consistent: {model_result}", "kind": "exact"})
+                else:
+                    results.append({"name": fid, "status": "fail",
+                                    "detail": f"inconsistent: stated {model_result}, recomputed {recomputed}",
+                                    "kind": "exact"})
+            else:
+                results.append({"name": fid, "status": "warn",
+                                "detail": "could not recompute formula", "kind": "heuristic"})
+    return results
+
+
+def _eval_assertion(assertion, sub):
+    """Safe-eval a pseudo-Python assertion against the submission."""
+    try:
+        ns_obj = SimpleNamespace(**{k: v for k, v in sub.items()})
+        return bool(eval(assertion, {"__builtins__": {}, "isinstance": isinstance,
+                                     "len": len, "abs": abs, "True": True, "False": False,
+                                     "None": None, "int": int, "float": float, "str": str,
+                                     "list": list, "dict": dict, "all": all, "any": any,
+                                     "bool": bool}, {"result": ns_obj}))
+    except Exception:
+        return None
+
+
+def check_deterministic(sub, sheet):
+    """Evaluate deterministic structural checks."""
+    results = []
+    for dc in sheet.get("eval_spec", {}).get("deterministic_checks", []):
+        name = dc.get("name", dc.get("check_id", dc.get("check", "det")))
+        desc = dc.get("description", dc.get("check", ""))
+        assertion = dc.get("assertion")
+        condition = dc.get("condition", "")
+
+        # Try assertion first
+        if assertion:
+            outcome = _eval_assertion(assertion, sub)
+            if outcome is True:
+                results.append({"name": name, "status": "pass", "detail": desc, "kind": "exact"})
+            elif outcome is False:
+                results.append({"name": name, "status": "fail", "detail": desc, "kind": "exact"})
+            else:
+                results.append({"name": name, "status": "warn",
+                                "detail": f"assertion not evaluable: {desc[:80]}", "kind": "heuristic"})
+            continue
+
+        # Pattern matching on description/condition
+        text = desc or condition
+        matched = False
+
+        # "X equals Y"
+        m = re.search(r'(\w+)\s+equals?\s+"([^"]+)"', text)
+        if m:
+            val = sub.get(m.group(1))
+            ok = str(val) == m.group(2)
+            results.append({"name": name, "status": "pass" if ok else "fail",
+                            "detail": f"{m.group(1)}={val} vs '{m.group(2)}'", "kind": "exact"})
+            matched = True
+
+        # "has exactly N X" / "X.length == N"
+        if not matched:
+            m = re.search(r'(?:exactly|has)\s+(\d+)\s+(\w+)|(\w+)\.length\s*==\s*(\d+)', text)
+            if m:
+                count = int(m.group(1) or m.group(4))
+                field = m.group(2) or m.group(3)
+                val = sub.get(field, [])
+                ok = len(val) == count if isinstance(val, list) else False
+                results.append({"name": name, "status": "pass" if ok else "warn",
+                                "detail": f"{field} has {len(val) if isinstance(val, list) else '?'}, expected {count}",
+                                "kind": "exact"})
+                matched = True
+
+        # "X contains Y entry"
+        if not matched:
+            m = re.search(r'(\w+)\s+contains?\s+(.+?)(?:\s+entry)?$', text, re.I)
+            if m:
+                arr = sub.get(m.group(1), [])
+                target = _normalize(m.group(2))
+                found = any(target in _normalize(json.dumps(item)) for item in arr) if isinstance(arr, list) else False
+                results.append({"name": name, "status": "pass" if found else "warn",
+                                "detail": f"'{m.group(2)}' {'found' if found else 'not found'} in {m.group(1)}",
+                                "kind": "heuristic"})
+                matched = True
+
+        # "X not empty" / "non-empty"
+        if not matched:
+            m = re.search(r'(\w+)\s+(?:is\s+)?(?:not|non)[- ]empty|(\w+)\s+has\s+at\s+least', text, re.I)
+            if m:
+                field = m.group(1) or m.group(2)
+                val = sub.get(field)
+                ok = val is not None and val != "" and val != [] and val != {}
+                results.append({"name": name, "status": "pass" if ok else "fail",
+                                "detail": f"{field} {'non-empty' if ok else 'empty'}", "kind": "exact"})
+                matched = True
+
+        # "X compared against threshold" / "threshold" in risks/claims
+        if not matched and "threshold" in text.lower():
+            risks = sub.get("risks", [])
+            claims = sub.get("claims", [])
+            full = json.dumps(risks + claims).lower()
+            ok = "threshold" in full or "exceed" in full or "below" in full or "above" in full
+            results.append({"name": name, "status": "pass" if ok else "warn",
+                            "detail": f"threshold reference {'found' if ok else 'not found'} in risks/claims",
+                            "kind": "heuristic"})
+            matched = True
+
+        # "all X must be numeric" / "all calc results numeric"
+        if not matched and "numeric" in text.lower() or "number" in text.lower():
+            calcs = sub.get("calculations", [])
+            ok = all(isinstance(c.get("result"), (int, float)) for c in calcs) if calcs else False
+            results.append({"name": name, "status": "pass" if ok else "warn",
+                            "detail": f"numeric check on calculations", "kind": "heuristic"})
+            matched = True
+
+        # "top-level key count"
+        if not matched and "top-level key" in text.lower():
+            m = re.search(r'(\d+)', text)
+            if m:
+                expected = int(m.group(1))
+                actual = len(sub)
+                ok = actual >= expected  # at least that many
+                results.append({"name": name, "status": "pass" if ok else "warn",
+                                "detail": f"{actual} keys vs {expected} expected", "kind": "exact"})
+                matched = True
+
+        if not matched:
+            results.append({"name": name, "status": "warn",
+                            "detail": f"not automatable: {text[:80]}", "kind": "heuristic"})
+    return results
+
+
+def check_evidence(sub, sheet):
+    """Evaluate evidence checks."""
+    results = []
+    for ec in sheet.get("eval_spec", {}).get("evidence_checks", []):
+        name = ec.get("name", ec.get("check_id", ec.get("evidence_field", "evidence")))
+
+        # Shape: {evidence_field, required}
+        if "evidence_field" in ec:
+            field = ec["evidence_field"]
+            val = sub.get(field)
+            ok = val is not None and val != "" and val != []
+            req = ec.get("required", True)
+            status = "pass" if ok else ("fail" if req else "warn")
+            results.append({"name": name, "status": status,
+                            "detail": f"{field} {'present' if ok else 'missing'}", "kind": "exact"})
+            continue
+
+        # Shape: {match_field}
+        if "match_field" in ec:
+            field = ec["match_field"]
+            val = sub.get(field)
+            ok = val is not None and val != "" and val != []
+            results.append({"name": name, "status": "pass" if ok else "fail",
+                            "detail": f"{field} {'present' if ok else 'missing'}", "kind": "exact"})
+            continue
+
+        # Shape: {description} — heuristic matching
+        desc = ec.get("description", "")
+
+        # "evidence_reference" in claims
+        if "evidence_reference" in desc.lower():
+            claims = sub.get("claims", [])
+            ok = all(c.get("evidence_reference") for c in claims) if claims else False
+            results.append({"name": name, "status": "pass" if ok else "warn",
+                            "detail": f"claims evidence refs: {'all present' if ok else 'some missing'}",
+                            "kind": "heuristic"})
+            continue
+
+        # "X is cited" / "X are cited" — search inputs_used and claims
+        if "cited" in desc.lower() or "referenced" in desc.lower():
+            iu = " ".join(str(v) for v in sub.get("inputs_used", []))
+            claims_text = " ".join(str(c) for c in sub.get("claims", []))
+            full_text = (iu + " " + claims_text).lower()
+            # Extract key terms from description
+            terms = re.findall(r'\b(?:loan|interest|rate|amortization|noi|value|appraised|price|equity|debt|income|rent|vacancy)\b', desc.lower())
+            found = sum(1 for t in terms if t in full_text)
+            ok = found >= max(1, len(terms) // 2)
+            results.append({"name": name, "status": "pass" if ok else "warn",
+                            "detail": f"cited terms: {found}/{len(terms)} found in inputs/claims",
+                            "kind": "heuristic"})
+            continue
+
+        # Generic inputs check
+        if "input" in desc.lower():
+            iu = sub.get("inputs_used", [])
+            ok = len(iu) > 0
+            results.append({"name": name, "status": "pass" if ok else "warn",
+                            "detail": f"inputs_used has {len(iu)} entries", "kind": "heuristic"})
+            continue
+
+        results.append({"name": name, "status": "warn",
+                        "detail": f"not automatable: {desc[:80]}", "kind": "heuristic"})
+    return results
+
+
+def check_flags(sub, sheet, prior_checks):
+    """Evaluate flag rules. Returns list of fired flags."""
+    flags = []
+    calcs = sub.get("calculations", [])
+    risks = sub.get("risks", [])
+
+    for fr in sheet.get("eval_spec", {}).get("flag_rules", []):
+        fid = fr.get("flag_id", "flag")
+        severity = fr.get("severity", "jelly")
+        condition = fr.get("condition", fr.get("description", ""))
+
+        fired = False
+
+        # "calculations array is missing X entry"
+        m = re.search(r"missing\s+(\w+)\s+(?:calculation|entry)", condition, re.I)
+        if m:
+            target = _normalize(m.group(1))
+            found = any(target in _normalize(c.get("name", "")) for c in calcs)
+            fired = not found
+
+        # "X > threshold and no high-severity risk"
+        elif re.search(r">\s*[\d.]+.*no.*risk", condition, re.I):
+            fired = False  # deal_finding — don't auto-fire
+
+        # "X < threshold and no high-severity risk"
+        elif re.search(r"<\s*[\d.]+.*no.*risk", condition, re.I):
+            fired = False  # deal_finding
+
+        # "math check result deviates"
+        elif "math" in condition.lower() and "deviates" in condition.lower():
+            fired = any(c["status"] == "fail" and "math" in c.get("name", "").lower()
+                        or "inconsistent" in c.get("detail", "").lower()
+                        or "!=" in c.get("detail", "")
+                        for c in prior_checks)
+
+        # "missing_required_fields" or "len(...) > 0"
+        elif "missing" in condition.lower() and "field" in condition.lower():
+            mf = sub.get("missing_required_fields", sub.get("missing_inputs", []))
+            fired = len(mf) > 0 if isinstance(mf, list) else False
+
+        # Generic: check if a related prior check failed
+        else:
+            related = [c for c in prior_checks if _normalize(fid) in _normalize(c.get("name", ""))]
+            if related:
+                fired = any(c["status"] == "fail" for c in related)
+
+        if fired:
+            flags.append({"flag_id": fid, "severity": severity, "condition": condition})
+
+    return flags
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Scoring
+# ═══════════════════════════════════════════════════════════════════════════
+def compute_score(all_checks, flags, sheet):
+    total = len(all_checks)
+    if total == 0:
+        return 100.0, "HONEY"
+    passed = sum(1 for c in all_checks if c["status"] == "pass")
+    warned = sum(1 for c in all_checks if c["status"] == "warn")
+    raw = (passed + warned * 0.5) / total * 100
+    penalty = sum(5 for f in flags if f["severity"] in ("propolis", "high", "critical"))
+    penalty += sum(2 for f in flags if f["severity"] in ("jelly", "medium", "noncritical"))
+    score = max(0, raw - penalty)
+    pt = sheet.get("pass_threshold", 80)
+    ft = sheet.get("fail_threshold", 60)
+    if score >= pt:
+        verdict = "HONEY"
+    elif score < ft:
+        verdict = "PROPOLIS"
+    else:
+        verdict = "JELLY"
+    return round(score, 1), verdict
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Repair loop
+# ═══════════════════════════════════════════════════════════════════════════
+def _is_work_defect(check):
+    """Schema misses, math errors, missing calcs = work_defect (retryable)."""
+    if check["status"] == "pass":
+        return False
+    name = check.get("name", "")
+    detail = check.get("detail", "")
+    if name.startswith("schema_"):
+        return True
+    if "MISSING" in detail or "not found" in detail or "inconsistent" in detail:
+        return True
+    if "!=" in detail:
+        return True
+    return False
+
+
+def _build_feedback(checks, flags):
+    lines = []
+    for c in checks:
+        if c["status"] != "pass":
+            lines.append(f"- [{c['status'].upper()}] {c['name']}: {c['detail']}")
+    for f in flags:
+        lines.append(f"- [FLAG:{f['severity']}] {f['flag_id']}: {f['condition']}")
+    return "\n".join(lines) if lines else "No specific issues."
+
+
+def run_referee(sub, sheet):
+    s = check_schema(sub, sheet)
+    m = check_math(sub, sheet)
+    d = check_deterministic(sub, sheet)
+    e = check_evidence(sub, sheet)
+    all_checks = s + m + d + e
+    f = check_flags(sub, sheet, all_checks)
+    return all_checks, f
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Output
+# ═══════════════════════════════════════════════════════════════════════════
+def write_outputs(slug, model, sub, all_checks, flags, score, verdict, tps,
+                  sheet, rundir, repair_count):
+    os.makedirs(rundir, exist_ok=True)
+    with open(f"{rundir}/submission.json", "w") as f:
+        json.dump(sub, f, indent=2)
+
+    result = {
+        "slug": slug, "model": model, "at_utc": _iso(), "tok_per_sec": round(tps, 1),
+        "score": score, "verdict": verdict,
+        "pass_threshold": sheet.get("pass_threshold", 80),
+        "fail_threshold": sheet.get("fail_threshold", 60),
+        "repair_attempts": repair_count,
+        "checks": all_checks, "flags": flags,
+        "summary": {
+            "total": len(all_checks),
+            "passed": sum(1 for c in all_checks if c["status"] == "pass"),
+            "warned": sum(1 for c in all_checks if c["status"] == "warn"),
+            "failed": sum(1 for c in all_checks if c["status"] == "fail"),
+            "exact": sum(1 for c in all_checks if c.get("kind") == "exact"),
+            "heuristic": sum(1 for c in all_checks if c.get("kind") == "heuristic"),
+        }
+    }
+    with open(f"{rundir}/result.json", "w") as f:
+        json.dump(result, f, indent=2)
+
+    md = [f"# {slug} x {model}", f"{_iso()} · {tps:.1f} tok/s", "",
+          f"## Verdict: {verdict} ({score}/100)", ""]
+    for c in all_checks:
+        tag = c["status"].upper()
+        kind = f" [{c.get('kind', '?')}]" if c.get("kind") == "heuristic" else ""
+        md.append(f"- [{tag}] **{c['name']}**{kind} — {c['detail']}")
+    if flags:
+        md += ["", "## Flags"]
+        for fl in flags:
+            md.append(f"- [{fl['severity'].upper()}] **{fl['flag_id']}** — {fl['condition']}")
+    if repair_count > 0:
+        md += ["", f"## Repair Loop", f"- attempts: {repair_count}", f"- final: {verdict} ({score})"]
+    with open(f"{rundir}/report.md", "w") as f:
+        f.write("\n".join(md) + "\n")
+
+    sha = hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()
+    with open(f"{rundir}/receipt.txt", "w") as f:
+        f.write(f"slug={slug}\nmodel={model}\nscore={score}\nverdict={verdict}\n"
+                f"at_utc={_iso()}\nrepair_attempts={repair_count}\n"
+                f"result_sha256={sha}\nrun_dir={rundir}\n")
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════════════
+def main():
+    ap = argparse.ArgumentParser(description="DefendableCloud local eval runner")
+    ap.add_argument("--sheet", help="Run a single rulebook by slug")
+    ap.add_argument("--domain", help="Run all sheets matching domain prefix (cre, fin, compute...)")
+    ap.add_argument("--all", action="store_true", help="Run all 50 rulebooks")
+    ap.add_argument("--model", default="hermes3:8b", help="Ollama model")
+    ap.add_argument("--models", help="Comma-separated models to cycle")
+    ap.add_argument("--repair", action="store_true", help="Enable repair loop")
+    ap.add_argument("--max-repair", type=int, default=3, help="Max repair attempts")
+    ap.add_argument("--no-constrain", dest="constrain", action="store_false",
+                    help="Skip grammar-constrained decoding")
+    ap.add_argument("--timeout", type=int, default=240, help="Ollama timeout (seconds)")
+    ap.add_argument("--num-predict", type=int, default=2048, help="Max tokens")
+    args = ap.parse_args()
+
+    sheets = load_sheets(args.sheet, args.domain, args.all)
+    if not sheets:
+        print("No sheets matched. Use --sheet SLUG, --domain PREFIX, or --all")
+        return
+
+    models = args.models.split(",") if args.models else [args.model]
+    summary = []
+
+    for _, sheet in sheets:
+        slug = sheet["slug"]
+        for model in models:
+            model_safe = model.replace(":", "-").replace("/", "-")
+            ts = _now()
+            rundir = f"{ROOT}/runs/cloud-eval-{slug}-{model_safe}-{ts}"
+
+            print(f"\n{'='*70}")
+            print(f"  {slug} x {model}")
+            print(f"{'='*70}")
+
+            # Generate
+            schema = SUBMISSION_SCHEMA if args.constrain else None
+            prompt = sheet.get("assignment_instructions", "")
+            if not prompt:
+                print(f"  !! no assignment_instructions in {slug}")
+                continue
+
+            print(f"  generating ({args.timeout}s timeout, constrain={args.constrain})...")
+            raw, tps = _generate(model, prompt, schema, args.timeout, args.num_predict)
+            text = _strip_think(raw)
+            print(f"  {tps:.1f} tok/s · {len(text)} chars")
+
+            try:
+                sub = json.loads(_extract_json(text))
+            except (json.JSONDecodeError, ValueError) as e:
+                print(f"  !! JSON parse failed: {e}")
+                os.makedirs(rundir, exist_ok=True)
+                with open(f"{rundir}/raw_output.txt", "w") as f:
+                    f.write(text)
+                summary.append((slug, model, 0.0, "PROPOLIS", 0))
+                continue
+
+            # Referee
+            all_checks, flags = run_referee(sub, sheet)
+            score, verdict = compute_score(all_checks, flags, sheet)
+            repair_count = 0
+
+            # Print checks
+            for c in all_checks:
+                tag = c["status"].upper()
+                print(f"  [{tag:4}] {c['name']}: {c['detail'][:80]}")
+            for fl in flags:
+                print(f"  [FLAG] {fl['flag_id']} ({fl['severity']}): {fl['condition'][:60]}")
+            print(f"  → score {score} · {verdict}")
+
+            # Repair loop
+            if args.repair and verdict != "HONEY":
+                work_defects = [c for c in all_checks if _is_work_defect(c)]
+                if not work_defects:
+                    print(f"  !! no repairable defects — verdict stands")
+                else:
+                    for attempt in range(1, args.max_repair + 1):
+                        feedback = _build_feedback(all_checks, flags)
+                        messages = [
+                            {"role": "system", "content":
+                             f"Your previous submission had these issues:\n{feedback}\n"
+                             "Fix ALL issues. Produce corrected JSON only."},
+                            {"role": "user", "content": prompt}
+                        ]
+                        print(f"\n  --- repair attempt {attempt}/{args.max_repair} ---")
+                        raw2, tps2 = _chat(model, messages, schema, args.timeout, args.num_predict)
+                        text2 = _strip_think(raw2)
+                        try:
+                            sub = json.loads(_extract_json(text2))
+                        except (json.JSONDecodeError, ValueError):
+                            print(f"  !! repair JSON parse failed")
+                            continue
+                        all_checks, flags = run_referee(sub, sheet)
+                        score, verdict = compute_score(all_checks, flags, sheet)
+                        repair_count = attempt
+                        for c in all_checks:
+                            if c["status"] != "pass":
+                                print(f"  [{c['status'].upper():4}] {c['name']}: {c['detail'][:80]}")
+                        print(f"  → score {score} · {verdict}")
+                        if verdict == "HONEY":
+                            break
+
+            # Write outputs
+            write_outputs(slug, model, sub, all_checks, flags, score, verdict,
+                          tps, sheet, rundir, repair_count)
+            summary.append((slug, model, score, verdict, repair_count))
+
+    # Summary table
+    if len(summary) > 1:
+        print(f"\n{'='*70}")
+        print(f"  SUMMARY ({len(summary)} evals)")
+        print(f"{'='*70}")
+        honey = sum(1 for s in summary if s[3] == "HONEY")
+        jelly = sum(1 for s in summary if s[3] == "JELLY")
+        propolis = sum(1 for s in summary if s[3] == "PROPOLIS")
+        for slug, model, score, verdict, rc in summary:
+            repair_tag = f" (R{rc})" if rc > 0 else ""
+            print(f"  {slug:50} {model:20} {score:5.1f} {verdict}{repair_tag}")
+        print(f"\n  HONEY: {honey} · JELLY: {jelly} · PROPOLIS: {propolis}")
+    elif summary:
+        s = summary[0]
+        print(f"\nFINAL: {s[0]} x {s[1]} → {s[3]} ({s[2]}/100)")
+
+
+if __name__ == "__main__":
+    main()

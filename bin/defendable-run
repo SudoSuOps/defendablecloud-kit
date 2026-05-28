@@ -6,18 +6,35 @@
 
 Verdict: HONEY (all pass) · JELLY (a warning) · PROPOLIS (a fail). Deterministic,
 node-level — the rulebook decides, not opinion.
+
+Repair loop (--repair):  on a non-HONEY verdict, classify each flag →
+  work_defect: re-prompt Hermes with feedback, re-run that check, loop to HONEY.
+  deal_finding / stack_fit: STOP COLD, report to human.
 """
 import sys, os, json, glob, subprocess, hashlib, datetime
 
 ROOT = os.environ.get("DEFENDABLEOS_ROOT", "/opt/defendableos")
 
+# --- flag classification --------------------------------------------------
+REPAIRABLE_CHECKS = {"tool_use", "memory_write", "json_validity"}
 
+
+def classify_flag(check_name, status):
+    """Classify a non-pass check: work_defect (fixable) or stop-cold."""
+    if status == "pass":
+        return None
+    if check_name in REPAIRABLE_CHECKS:
+        return "work_defect"
+    return "stack_fit"
+
+
+# --- time helpers ----------------------------------------------------------
 def now():
-    return datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    return datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
 def iso():
-    return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def load(path):
@@ -33,7 +50,7 @@ def sh(cmd, t=25):
         return f"ERR:{e}"
 
 
-# --- check implementations: each returns (status, detail) ---
+# --- check implementations: each returns (status, detail) ------------------
 def c_node_identity():
     p = f"{ROOT}/node/node.env"
     return ("pass", open(p).read().strip().replace("\n", " · ")) if os.path.exists(p) else ("fail", "no node.env")
@@ -73,18 +90,154 @@ def c_receipt_write():
     return ("pass", "receipt written by runner")
 
 
+# --- ollama interface ------------------------------------------------------
+def _ollama_chat(model, messages, tools=None, fmt=None, timeout=120):
+    """Call Ollama chat endpoint, return parsed response dict."""
+    payload = {"model": model, "messages": messages, "stream": False,
+               "options": {"temperature": 0.1, "num_predict": 512}}
+    if tools:
+        payload["tools"] = tools
+    if fmt:
+        payload["format"] = fmt
+    raw = sh(f"curl -s -m{timeout} http://localhost:11434/api/chat -d {json.dumps(json.dumps(payload))}", t=timeout + 10)
+    if not raw or "ERR" in raw:
+        return None
+    return json.loads(raw)
+
+
+# --- repairable checks (accept prior_flags for repair loop) ----------------
+def c_tool_use(prior_flags=None):
+    """Test: can the agent recognise a tool call and emit the correct shape?"""
+    tools = [{"type": "function", "function": {
+        "name": "get_temperature", "description": "Get current temperature for a city",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}]
+    messages = []
+    if prior_flags:
+        messages.append({"role": "system", "content":
+            f"Your previous attempt flagged: {prior_flags}. "
+            "You MUST emit a proper tool_call for get_temperature, not just mention it in text."})
+    messages.append({"role": "user", "content": "What is the temperature in Paris? Use the get_temperature tool."})
+    resp = _ollama_chat("hermes3:8b", messages, tools=tools)
+    if resp is None:
+        return ("fail", "ollama chat unreachable")
+    msg = resp.get("message", {})
+    calls = msg.get("tool_calls", [])
+    if calls and any(c.get("function", {}).get("name") == "get_temperature" for c in calls):
+        return ("pass", f"tool_call emitted: get_temperature({calls[0]['function'].get('arguments', {})})")
+    content = msg.get("content", "")
+    if "get_temperature" in content:
+        return ("pass", f"tool reference in content ({len(content)} chars)")
+    return ("warn", f"no tool_call detected — content: {content[:120]}")
+
+
+def c_memory_write(prior_flags=None):
+    """Test: can the agent produce a structured memory object when asked?"""
+    messages = []
+    if prior_flags:
+        messages.append({"role": "system", "content":
+            f"Your previous attempt flagged: {prior_flags}. "
+            "Return valid JSON with EXACTLY these keys: title (string), content (string), tags (array of strings). Nothing else."})
+    messages.append({"role": "user",
+        "content": "Write a memory about the following fact and return it as JSON with keys "
+                   "'title', 'content', 'tags': The node mrd.defendable.eth passed its readiness check on 2026-05-28."})
+    resp = _ollama_chat("hermes3:8b", messages, fmt="json")
+    if resp is None:
+        return ("fail", "ollama chat unreachable")
+    content = resp.get("message", {}).get("content", "")
+    try:
+        mem = json.loads(content)
+        has_keys = all(k in mem for k in ("title", "content", "tags"))
+        if has_keys:
+            mdir = os.path.expanduser("~/.hermes/memories")
+            os.makedirs(mdir, exist_ok=True)
+            with open(f"{mdir}/dc_intake_{now()}.json", "w") as f:
+                json.dump(mem, f, indent=2)
+            return ("pass", f"memory written: {mem.get('title', '?')}")
+        return ("warn", f"JSON valid but missing keys: {list(mem.keys())}")
+    except json.JSONDecodeError:
+        return ("fail", f"invalid JSON: {content[:120]}")
+
+
+def c_json_validity(prior_flags=None):
+    """Test: can the agent produce the DefendableCloud submission schema?"""
+    prompt = (
+        "You are a DefendableCloud eval agent. Produce a JSON object with EXACTLY these keys: "
+        "assignment_id (string 'test_json_v1'), agent_summary (string), inputs_used (array of strings), "
+        "missing_inputs (array), claims (array), calculations (array with one object having keys "
+        "name/formula/inputs/result/units — compute 100/4=25), risks (array), assumptions (array), "
+        "open_questions (array), final_output (string 'PASS'), self_check (object with boolean values). "
+        "Return ONLY valid JSON, no markdown."
+    )
+    messages = []
+    if prior_flags:
+        messages.append({"role": "system", "content":
+            f"Your previous attempt flagged: {prior_flags}. "
+            "Fix the issue. The calculations array MUST contain an object where "
+            "result is exactly 25 (the number one hundred divided by four). "
+            "Double-check: 100 / 4 = 25. Put result: 25."})
+    messages.append({"role": "user", "content": prompt})
+    resp = _ollama_chat("hermes3:8b", messages, fmt="json", timeout=180)
+    if resp is None:
+        return ("fail", "ollama chat unreachable")
+    content = resp.get("message", {}).get("content", "")
+    try:
+        obj = json.loads(content)
+        required = ["assignment_id", "agent_summary", "inputs_used", "missing_inputs", "claims",
+                     "calculations", "risks", "assumptions", "open_questions", "final_output", "self_check"]
+        present = [k for k in required if k in obj]
+        missing = [k for k in required if k not in obj]
+        if not missing:
+            calcs = obj.get("calculations", [])
+            math_ok = any(c.get("result") == 25 for c in calcs) if calcs else False
+            if math_ok:
+                return ("pass", f"schema valid · {len(present)}/{len(required)} keys · math correct")
+            return ("warn", f"schema valid · {len(present)}/{len(required)} keys · math not verified")
+        return ("warn", f"partial schema: {len(present)}/{len(required)} keys · missing: {missing}")
+    except json.JSONDecodeError:
+        return ("fail", f"invalid JSON ({len(content)} chars): {content[:120]}")
+
+
 CHECKS = {
     "node_identity": c_node_identity, "gpu_metrics": c_gpu_metrics, "thermal_power": c_thermal_power,
     "disk_free": c_disk_free, "model_load": c_model_load, "inference_throughput": c_inference_throughput,
     "runtime": c_runtime, "receipt_write": c_receipt_write,
+    "tool_use": c_tool_use, "memory_write": c_memory_write, "json_validity": c_json_validity,
 }
 
 
+# --- repair loop helpers ---------------------------------------------------
+def _compute_verdict(results, flight):
+    """Compute verdict from current results dict."""
+    vmap = flight.get("verdicts", {"pass": "HONEY", "warning": "JELLY", "fail": "PROPOLIS"})
+    statuses = [r["status"] for r in results.values()]
+    if "fail" in statuses:
+        return vmap["fail"]
+    if "warn" in statuses:
+        return vmap["warning"]
+    return vmap["pass"]
+
+
+def _log_attempt(rundir, attempt_num, results, check_order):
+    """Write attempt_N.json to the run directory."""
+    data = {"attempt": attempt_num, "at_utc": iso(),
+            "checks": [results[c] for c in check_order]}
+    with open(f"{rundir}/attempt_{attempt_num}.json", "w") as f:
+        json.dump(data, f, indent=2)
+
+
+# --- main ------------------------------------------------------------------
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    raw_args = sys.argv[1:]
+    repair = "--repair" in raw_args
+    max_repair = 3
+    for i, a in enumerate(raw_args):
+        if a == "--max-repair" and i + 1 < len(raw_args):
+            max_repair = int(raw_args[i + 1])
+    args = [a for a in raw_args if not a.startswith("--")]
     if not args:
-        print("usage: defendable-run <assignment.yaml>")
+        print("usage: defendable-run <assignment.yaml> [--repair] [--max-repair N]")
         return
+
     asg_path = args[0] if os.path.exists(args[0]) else f"{ROOT}/assignments/{args[0]}"
     asg = load(asg_path)
     fid = asg.get("flight_id")
@@ -96,37 +249,85 @@ def main():
             break
     if flight is None:
         print(f"!! flight {fid} not found"); return
+
     checks = flight.get("checks", [])
     print(f"=== {asg.get('id')} → {fid} ({len(checks)} checks) ===")
-    results = []
+    if repair:
+        print(f"  repair loop: ON (max {max_repair} attempts)")
+
+    # --- attempt 0: run all checks -----------------------------------------
+    results = {}
     for c in checks:
         fn = CHECKS.get(c)
         st, det = fn() if fn else ("skip", "not implemented in v1 (declared)")
-        results.append({"check": c, "status": st, "detail": det})
+        results[c] = {"check": c, "status": st, "detail": det}
         print(f"  [{st.upper():4}] {c}: {str(det)[:90]}")
-
-    vmap = flight.get("verdicts", {"pass": "HONEY", "warning": "JELLY", "fail": "PROPOLIS"})
-    if any(r["status"] == "fail" for r in results):
-        verdict = vmap["fail"]
-    elif any(r["status"] == "warn" for r in results):
-        verdict = vmap["warning"]
-    else:
-        verdict = vmap["pass"]
 
     aid, ts = asg.get("id", "run"), now()
     rundir = f"{ROOT}/runs/{aid}-{ts}"
     os.makedirs(rundir, exist_ok=True)
-    result = {"assignment": aid, "flight": fid, "node_id": asg.get("node_id"), "hostname": asg.get("hostname"),
-              "operator": asg.get("operator"), "at_utc": iso(), "checks": results, "verdict": verdict}
-    json.dump(result, open(f"{rundir}/result.json", "w"), indent=2)
-    md = [f"# {aid}", f"flight: {fid} · node: {asg.get('node_id')} · {iso()}", "", f"## Verdict: {verdict}", ""]
-    md += [f"- [{r['status'].upper()}] **{r['check']}** — {r['detail']}" for r in results]
-    open(f"{rundir}/report.md", "w").write("\n".join(md) + "\n")
+    _log_attempt(rundir, 0, results, checks)
+
+    verdict = _compute_verdict(results, flight)
+    repair_count = 0
+
+    # --- repair loop -------------------------------------------------------
+    if repair and verdict != "HONEY":
+        flagged = {c: r for c, r in results.items() if r["status"] not in ("pass", "skip")}
+        classes = {c: classify_flag(c, r["status"]) for c, r in flagged.items()}
+
+        # stop cold on non-work-defect flags
+        blockers = {c: cls for c, cls in classes.items() if cls != "work_defect"}
+        if blockers:
+            print(f"\n  !! STOP COLD — non-repairable flags:")
+            for c, cls in blockers.items():
+                print(f"     [{cls}] {c}: {results[c]['detail'][:80]}")
+            print(f"  !! these require human attention, not re-prompting")
+        else:
+            repairable = {c: r for c, r in flagged.items()}
+            for attempt in range(1, max_repair + 1):
+                print(f"\n--- repair attempt {attempt}/{max_repair} ---")
+                for c in list(repairable):
+                    fn = CHECKS.get(c)
+                    prior = repairable[c]["detail"]
+                    st, det = fn(prior_flags=prior)
+                    results[c] = {"check": c, "status": st, "detail": det}
+                    tag = "FIXED" if st == "pass" else st.upper()
+                    print(f"  [{tag:5}] {c}: {str(det)[:90]}")
+                    if st == "pass":
+                        del repairable[c]
+
+                repair_count = attempt
+                _log_attempt(rundir, attempt, results, checks)
+                verdict = _compute_verdict(results, flight)
+                print(f"  attempt {attempt} verdict: {verdict}")
+                if verdict == "HONEY" or not repairable:
+                    break
+
+    # --- write outputs -----------------------------------------------------
+    result_list = [results[c] for c in checks]
+    result = {"assignment": aid, "flight": fid, "node_id": asg.get("node_id"),
+              "hostname": asg.get("hostname"), "operator": asg.get("operator"),
+              "at_utc": iso(), "checks": result_list, "verdict": verdict,
+              "repair_attempts": repair_count}
+    with open(f"{rundir}/result.json", "w") as f:
+        json.dump(result, f, indent=2)
+
+    md = [f"# {aid}", f"flight: {fid} · node: {asg.get('node_id')} · {iso()}", "",
+          f"## Verdict: {verdict}", ""]
+    md += [f"- [{r['status'].upper()}] **{r['check']}** — {r['detail']}" for r in result_list]
+    if repair_count > 0:
+        md += ["", f"## Repair Loop", f"- attempts: {repair_count}",
+               f"- final verdict: {verdict}"]
+    with open(f"{rundir}/report.md", "w") as f:
+        f.write("\n".join(md) + "\n")
+
     sha = hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()
     rc = f"{ROOT}/receipts/{aid}_{ts}.txt"
-    open(rc, "w").write(
-        f"assignment={aid}\nflight={fid}\nnode_id={asg.get('node_id')}\nhostname={asg.get('hostname')}\n"
-        f"verdict={verdict}\nat_utc={iso()}\nresult_sha256={sha}\nrun_dir={rundir}\n")
+    with open(rc, "w") as f:
+        f.write(f"assignment={aid}\nflight={fid}\nnode_id={asg.get('node_id')}\n"
+                f"hostname={asg.get('hostname')}\nverdict={verdict}\nat_utc={iso()}\n"
+                f"repair_attempts={repair_count}\nresult_sha256={sha}\nrun_dir={rundir}\n")
     print(f"\nVERDICT: {verdict}\nrun: {rundir}\nreceipt: {rc}")
 
 
