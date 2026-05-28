@@ -1,0 +1,24 @@
+id: assignment-001-node-readiness
+name: Node 001 Readiness Check
+flight_id: flight-rig-smoke-test-v001
+purpose: |
+  First-run sanity check the README points at. Proves the node has identity,
+  a GPU the runner can read, an Ollama runtime, free disk, at least one model
+  loaded, and can write a receipt. The seven checks are the seven the
+  rig-smoke-test flightsheet declares — all deterministic, none skipped.
+operator_instructions: |
+  Run on a freshly-installed DefendableCloud node after defendable-node-init:
+      defendable-run assignment-001-node-readiness.yaml
+  Healthy rig (Ollama up + at least one model pulled) → HONEY.
+  Missing model or runtime down → JELLY/PROPOLIS, and the report tells you why.
+required_inputs: []
+expected_outputs:
+  - node_identity
+  - gpu_metrics
+  - thermal_power
+  - disk_free
+  - model_load
+  - inference_throughput
+  - receipt_write
+human_review: recommended
+receipt_type: node_readiness_receipt

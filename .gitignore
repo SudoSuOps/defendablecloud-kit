@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 assignments/*
 !assignments/.gitkeep
+!assignments/assignment-001-node-readiness.yaml
